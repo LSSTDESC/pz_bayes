@@ -1,0 +1,3 @@
+*.npz
+*.tgz
+.ipynb_checkpoints
