@@ -128,8 +128,9 @@ class SelfOrganizingMap(object):
     def __init__(self, mapgeom):
         self._mapgeom = mapgeom
         
-    def fit(self, data, maxiter=100, evolve_freq=20, eta=0.9, init='random', seed=123):
-                
+    def fit(self, data, maxiter=100, eta=0.5, sigma_frac=1, init='random', seed=123):
+
+        # Reformat data if not a numpy array.        
         if type(data) is np.ndarray:
             pass
         else:
@@ -142,66 +143,62 @@ class SelfOrganizingMap(object):
             data = data_arr
         
         N, D = data.shape
-        self._winner = np.empty(N, np.uint32)
+        self._dx = np.empty((maxiter, N, D, self._mapgeom.size))
+        self._corrections = np.empty((maxiter, N, D, self._mapgeom.size))
+        # Store BMU for every epoch, and after the introduction of each new data vector.
+        self._winner = np.empty((maxiter, N), np.uint32)
+        # Store loss values for every epoch.
+        self._loss = np.empty(maxiter)
+        # Store the state of all weights for each epoch, and after the introduction of 
+        # each new data vector.
+        self._all_weights = np.empty((maxiter, N, D, self._mapgeom.size))
         rng = np.random.RandomState(seed)
         if init == 'random':
             sigmas = np.std(data, axis=0)
+            # Real-time value of weights.
             self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
         else:
             raise ValueError('Invalid init "{}".'.format(init))
-        assert maxiter % evolve_freq == 0
-        n_evolve = int(maxiter / evolve_freq)
-        evolve_iter = 0
-        self._evolve_weights = np.tile(self._weights[np.newaxis, :, :], (n_evolve,1,1))
         # Calculate mean separation between grid points as a representative large scale.
-        large_scale = np.mean(self._mapgeom.separations)
+        #large_scale = np.mean(self._mapgeom.separations)
+        # Make sure the initial neighborhood is at least as large as the largest separation. 
+        large_scale = np.max(self._mapgeom.separations)
         # Calculate the mean separation between N uniformly distributed points in D dimensions
         # as a representative small scale.
         volume = np.prod(self._mapgeom.shape)
         small_scale = (volume / N) ** (1 / D)
         assert small_scale < large_scale, 'Check the scales!'
-        scale = large_scale
-        dscale = (small_scale / large_scale) ** (1 / maxiter)
+        scale = sigma_frac * large_scale
+        self._scale = scale
+        #dscale = (small_scale / large_scale) ** (1 / maxiter)
         for i in range(maxiter):
             loss = 0.
             learn_rate = eta ** (i / maxiter)
             gauss_width = scale ** (1 - i / maxiter)
             for j, x in enumerate(data):
-            #for j, (x,y) in enumerate(zip(data,errs)):
                 # Calculate the Euclidean data-space distance squared between x and
                 # each map site's weight vector.
                 dx = x.reshape(-1, 1) - self._weights
+                self._dx[i,j] = dx 
                 distsq = np.sum(dx ** 2, axis=0)
-                # Not doing this yet ... 
-                # Calculate the reduced X^2 distance between training object x and
-                # the cell weight vector
-                #dx = x.reshape(-1,1) - self._weights
-                #distsq = (1 / D) * np.sum((dx ** 2) / (y.reshape(-1,1) ** 2), axis=0)
-                
                 # Find the map site with the smallest distance (largest dot product).
-                self._winner[j] = k = np.argmin(distsq)
+                self._winner[i,j] = k = np.argmin(distsq)
                 # The loss is the sum of smallest (data space) distances for each data point.
                 loss += np.sqrt(distsq[k])
                 # Update all weights (dz are map-space distances).
                 dz = self._mapgeom.separations[k]
-                #self._weights += eta * np.exp(-0.5 * (dz / scale) ** 2) * dx
+                self._corrections[i,j] = learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
                 self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
-            if i % evolve_freq == 0:
-                self._evolve_weights[evolve_iter] = self._weights
-                evolve_iter += 1
-            print(learn_rate)
-            yield i, loss
-            # Lower the scale for the next iteration.
-            scale *= dscale
+                self._all_weights[i,j] = self._weights
+            self._loss[i] = loss
 
 
-def u_matrix(som):
+def u_matrix(som_weights):
     
     ''' * Add option to interpolate onto finer grid
-    
     From p. 337 of this paper https://link.springer.com/content/pdf/10.1007%2F978-3-642-15381-5.pdf'''
     
-    rows, cols, D = som.shape
+    rows, cols, D = som_weights.shape
     
     u_matrix = np.empty((rows, cols))
     
@@ -210,36 +207,25 @@ def u_matrix(som):
             dist = 0
             ## neighbor above
             if i < rows - 1:
-                dist += np.sqrt(np.sum((som[i,j] - som[i+1,j]) ** 2))
+                dist += np.sqrt(np.sum((som_weights[i,j] - som_weights[i+1,j]) ** 2))
             ## neighbor below
             if i > 0:
-                dist += np.sqrt(np.sum((som[i,j] - som[i-1,j]) ** 2))
+                dist += np.sqrt(np.sum((som_weights[i,j] - som_weights[i-1,j]) ** 2))
             ## neighbor left
             if j > 0:
-                dist += np.sqrt(np.sum((som[i,j] - som[i,j-1]) ** 2))
+                dist += np.sqrt(np.sum((som_weights[i,j] - som_weights[i,j-1]) ** 2))
             ## neighbor right
             if j < cols - 1:
-                dist += np.sqrt(np.sum((som[i,j] - som[i,j+1]) ** 2))
+                dist += np.sqrt(np.sum((som_weights[i,j] - som_weights[i,j+1]) ** 2))
             u_matrix[i,j] = np.sum(dist)
-
-                
-    ## interpolate u_matrix onto (2X-1) x (2Y-1) grid
-    #x = np.arange(0,rows - interp_int, interp_int)
-    #y = np.arange(0,cols - interp_int, interp_int)
             
     return(u_matrix)
 
-def make_som(data, nmap=-50, niter=100, evolve_freq=20, eta=0.1, rgb=None, save=None):
+def make_som(data, nmap=-50, niter=100, eta=0.5, sigma_frac=1, rgb=None, seed=123):
 
     # Build the self-organizing map.
     som = SelfOrganizingMap(Grid(nmap, nmap))
-    losses = []
-    for it, loss in som.fit(data, maxiter=niter, evolve_freq=evolve_freq, eta=eta):
-        if it > 0:
-            if losses[it-1] < loss:
-                print('Loss function getting worse at iteration {}'.format(it))
-        losses.append(loss)
-        #eta *= 0.9
+    som.fit(data, maxiter=niter, eta=eta, sigma_frac=sigma_frac, seed=seed)
 
     if type(data) is np.ndarray:
         N, D = data.shape
@@ -250,29 +236,25 @@ def make_som(data, nmap=-50, niter=100, evolve_freq=20, eta=0.1, rgb=None, save=
     fig, ax = plt.subplots(2, 1, figsize=(8, 16))
     ax = ax.ravel()
     weights = som._weights.T
-    som_img = weights.reshape(abs(nmap), abs(nmap), D)
+    # Normalize weights to be between [0,1]
     weights = (weights - weights.min(axis=0)) / (weights.max(axis=0) - weights.min(axis=0))
     if rgb:
-        rgb_som = np.empty((weights.shape[0],3))
-        for i, band in enumerate(rgb):
-            rgb_som[:,i] = weights[:,band]
-        rgb_som /= np.max(rgb_som)
-        rgb_img = rgb_som.reshape(abs(nmap), abs(nmap), 3)
-        ax[0].imshow(rgb_img, interpolation='none', origin='lower', cmap='viridis')
+        assert len(rgb) == 3
+        # Select features to show in RGB map
+        rgb_weights = weights[:,rgb]
+        rgb_map = rgb_weights.reshape(abs(nmap), abs(nmap), 3)
+        im = ax[0].imshow(rgb_map, interpolation='none', origin='lower', cmap='viridis')
     else:
-        u_map = u_matrix(som_img)
+        u_map = u_matrix(weights.reshape(abs(nmap), abs(nmap), D))
         im = ax[0].imshow(u_map, interpolation='none', origin='lower', cmap='viridis')
-    fig.colorbar(im, ax=ax[0])
     ax[0].axis('off')
-    ax[1].plot(losses, 'ko')
+    ax[1].plot(som._loss, 'ko')
     ax[1].set_xlabel('Epoch')
     ax[1].set_ylabel('Training Loss')
     plt.tight_layout()
 
-    if save:
-        np.save(save, som_img)
-
-    return(weights, som._evolve_weights.T, som_img)
+    # Return SOM and normalized weights
+    return(som, weights)
 
 def deep_phot_hist2d(deep_data, phot_data, cols=['u-g', 'g-r'], bins=100):
     
@@ -297,14 +279,12 @@ def deep_phot_hist2d(deep_data, phot_data, cols=['u-g', 'g-r'], bins=100):
 
     plt.show()
 
-def map_phot_to_som(data, som_weights):
+def map_phot_to_som(data, normalized_weights):
     
     '''Takes an (N, features) data array and a SOM and returns
     the flattened SOM index to which each data vector belongs, 
     as well as the number of data points mapped to each SOM cell.'''
-    
-    rows, cols, D = som_weights.shape
-    
+        
     if type(data) is np.ndarray:
             pass
     else:
@@ -315,27 +295,37 @@ def map_phot_to_som(data, som_weights):
             data_arr[:,k] = data[name]
 
         data = data_arr
+
+    data = (data - np.min(data, axis=0)) / (np.max(data, axis=0) - np.min(data, axis=0))
+
+    N, D = data.shape
+    
+    #assert normalized_weights.shape[0] == som._mapgeom.size
+    #assert normalized_weights.shape[1] == D
         
-    ## Calculate L2 norm distance between data weights and SOM weights
-    som_indices = np.empty(len(data), dtype=int)
-    for i, dat in enumerate(data):
-        dx = (dat - som_weights.reshape(rows * cols,-1))
-        dist = np.sqrt(np.sum(dx ** 2, axis=1))
-        som_indices[i] = np.argmin(dist)
+    ## Calculate distance between data weights and SOM weights
+    som_indices = np.empty(N, dtype=int)
+    for i, x in enumerate(data):
+        dx = (x - normalized_weights)
+        som_indices[i] = np.argmin(np.sum(dx ** 2, axis=1))
         
     ## Determine frequency of each index on SOM resolution grid
-    counts = np.bincount(som_indices, minlength=(rows * cols))
+    som_counts = np.bincount(som_indices, minlength=(normalized_weights.shape[0]))
     
-    return(som_indices, counts)
+    return(som_indices, som_counts)
 
-def plot_counts_per_cell(som_indices, som_counts, rows, cols, norm=None):
+def plot_counts_per_cell(data, normalized_weights, norm=None):
     
     '''Plot number of data points mapped to each SOM cell
 
     Counts must have same shape as SOM grid.'''
 
+    indices, counts = map_phot_to_som(data, normalized_weights)
+    nside = int(np.sqrt(normalized_weights.shape[0]))
+
     plt.figure(figsize=(10,7))
-    plt.imshow(som_counts.reshape(rows,cols), origin='lower', interpolation='none', cmap='viridis', norm=norm)
+    plt.imshow(counts.reshape(nside,nside), origin='lower', interpolation='none', 
+        cmap='viridis', norm=norm)
     plt.colorbar()
     plt.title('Number per SOM cell')
     plt.show()
