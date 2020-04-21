@@ -136,7 +136,6 @@ class SelfOrganizingMap(object):
     def __init__(self, mapgeom):
         self._mapgeom = mapgeom
 
-
     def find_bmu(self, data, return_distances=False):
         # Calculate best-matching cell for all inputs simultaneously:
         if len(data.shape) > 1:
@@ -154,7 +153,7 @@ class SelfOrganizingMap(object):
 
         
     def fit(self, data, maxiter=100, eta=0.5, init='random', seed=123):
-
+        
         # Reformat data if not a numpy array.        
         if type(data) is np.ndarray:
             pass
@@ -162,42 +161,35 @@ class SelfOrganizingMap(object):
             data = table_to_array(data)
         
         N, D = data.shape
-        # Store BMU for every epoch, and after the introduction of each new data vector.
-        self._winner = np.empty((maxiter, N), np.uint32)
+
+        # Randomize data
+        rng = np.random.RandomState(seed)
+        rndm = rng.choice(np.arange(N), size=N, replace=False)
+        data = data[rndm]
+
         # Store loss values for every epoch.
         self._loss = np.empty(maxiter)
-        # Store the state of all weights for each epoch, and after the introduction of 
-        # each new data vector.
-        self._all_weights = np.empty((maxiter, N, D, self._mapgeom.size))
-        rng = np.random.RandomState(seed)
         if init == 'random':
             sigmas = np.std(data, axis=0)
-            # Real-time value of weights.
             self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
         else:
             raise ValueError('Invalid init "{}".'.format(init))
         # Calculate mean separation between grid points as a representative large scale.
-        #large_scale = np.mean(self._mapgeom.separations)
-        # Make sure the initial neighborhood is at least as large as the largest separation. 
-        large_scale = np.max(self._mapgeom.separations)
-        scale = large_scale
-        self._scale = scale
+        large_scale = np.mean(self._mapgeom.separations)
         for i in range(maxiter):
             loss = 0.
             learn_rate = eta ** (i / maxiter)
-            gauss_width = scale ** (1 - i / maxiter)
+            gauss_width = large_scale ** (1 - i / maxiter)
             for j, x in enumerate(data):
                 # Calculate the Euclidean data-space distance squared between x and
                 # each map site's weight vector.
-                k, dx = self.find_bmu(x, return_distances=True)
-                self._winner[i,j] = k 
+                bmu, dx = self.find_bmu(x, return_distances=True)
                 distsq = np.sum(dx ** 2, axis=0)
                 # The loss is the sum of smallest (data space) distances for each data point.
-                loss += np.sqrt(distsq[k])
+                loss += np.sqrt(distsq[bmu])
                 # Update all weights (dz are map-space distances).
                 dz = self._mapgeom.separations[k]
                 self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
-                self._all_weights[i,j] = self._weights
             self._loss[i] = loss
 
 
