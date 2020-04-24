@@ -123,7 +123,7 @@ class Grid(MapGeometry):
                   extent=[-0.5, nx - 0.5, -0.5, ny - 0.5], **kwargs)
         ax.axis('off')
 
-def table_to_array(table):
+def table_to_array(data):
 
     colnames = data.colnames
     data_arr = np.zeros((len(data),len(colnames)))
@@ -188,7 +188,7 @@ class SelfOrganizingMap(object):
                 # The loss is the sum of smallest (data space) distances for each data point.
                 loss += np.sqrt(distsq[bmu])
                 # Update all weights (dz are map-space distances).
-                dz = self._mapgeom.separations[k]
+                dz = self._mapgeom.separations[bmu]
                 self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
             self._loss[i] = loss
 
@@ -269,25 +269,17 @@ class SelfOrganizingMap(object):
         assert target.shape == (N,)
             
         ## Calculate distance between data weights and SOM weights
-        indices = self.find_bmu(data)
+        self._indices, self._node_weight_separations = self.find_bmu(data, return_distances=True)
         ## Get distribution of feature values for each cell
-        self._feature_dist = [data[indices == i] for i in range(self._mapgeom.size)]
-        self._target_dist = [target[indices == i] for i in range(self._mapgeom.size)]
+        self._feature_dist = [data[self._indices == i] for i in range(self._mapgeom.size)]
+        self._target_dist = [target[self._indices == i] for i in range(self._mapgeom.size)]
 
-    def plot_counts_per_cell(self, data, norm=None):
+    def plot_counts_per_cell(self, norm=None):
     
         '''Plot number of data points mapped to each SOM cell.'''
 
-        # Reformat data if not a numpy array.        
-        if type(data) is np.ndarray:
-            pass
-        else:   
-            data = table_to_array(data)
-
-        indices = self.find_bmu(data)
-
         # Determine frequency of each index on SOM resolution grid
-        counts = np.bincount(indices, minlength=(self._mapgeom.size))
+        counts = np.bincount(self._indices, minlength=(self._mapgeom.size))
         self._counts = counts.reshape(self._mapgeom.shape)
 
         plt.figure(figsize=(10,7))
@@ -297,21 +289,29 @@ class SelfOrganizingMap(object):
         plt.title('Number per SOM cell')
         plt.show()
 
-    def plot_statistic(self, column=-1, statistic=np.mean):
+    def plot_statistic(self, feature=None, statistic=np.nanmean):
 
-        '''If column = -1, calculate the statistic for the target values. Otherwise
-        calculate the statistic for the feature number.'''
+        ## To do: handle empty cells
 
-        if column == -1:
-            stat = np.asarray([statistic(self._target_dist[i]) for i in range(self._mapgeom.size)])
+        if feature:
+            fig, axs = plt.subplots(1,2, figsize=(12,5))
+            axs = axs.ravel()
+            # Plot statistic of feature per cell
+            stat = np.asarray([statistic(self._feature_dist[i][:,feature]) for i in range(self._mapgeom.size)])
+            im0 = axs[0].imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            fig.colorbar(im0, ax=axs[0])
+            # Plot statistic of difference between feature weights and node weights per cell
+            diff = statistic(self._node_weight_separations, axis=0)[feature]
+            im1 = axs[1].imshow(diff.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            fig.colorbar(im1, ax=axs[1])
+            plt.show()
+
         else:
-            stat = np.asarray([statistic(self._feature_dist[i][:,column]) for i in range(self._mapgeom.size)])
-        
-        plt.figure(figsize=(10,7))
-        plt.imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
-        plt.colorbar()
-        plt.show()
-
+            stat = np.asarray([statistic(self._target_dist[i]) for i in range(self._mapgeom.size)])
+            plt.figure(figsize=(10,7))
+            plt.imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            plt.colorbar()
+            plt.show()
 
     def plot_sed_in_cell(self, cell, seed=123):
 
