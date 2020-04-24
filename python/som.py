@@ -269,7 +269,7 @@ class SelfOrganizingMap(object):
         assert target.shape == (N,)
             
         ## Calculate distance between data weights and SOM weights
-        self._indices, self._node_weight_separations = self.find_bmu(data, return_distances=True)
+        self._indices = self.find_bmu(data)
         ## Get distribution of feature values for each cell
         self._feature_dist = [data[self._indices == i] for i in range(self._mapgeom.size)]
         self._target_dist = [target[self._indices == i] for i in range(self._mapgeom.size)]
@@ -301,7 +301,7 @@ class SelfOrganizingMap(object):
             im0 = axs[0].imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
             fig.colorbar(im0, ax=axs[0])
             # Plot statistic of difference between feature weights and node weights per cell
-            diff = statistic(self._node_weight_separations, axis=0)[feature]
+            diff = np.asarray([statistic(self._feature_dist[i] - self._weights.T[i], axis=0)[feature] for i in range(self._mapgeom.size)])
             im1 = axs[1].imshow(diff.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
             fig.colorbar(im1, ax=axs[1])
             plt.show()
