@@ -152,8 +152,10 @@ class SelfOrganizingMap(object):
         else: return(bmu)
 
         
-    def fit(self, data, maxiter=100, eta=0.5, init='random', seed=123):
+    def fit(self, data, maxiter=100, eta=0.5, init='random', seed=123, somz=False):
         
+        rng = np.random.RandomState(seed)
+
         # Reformat data if not a numpy array.        
         if type(data) is np.ndarray:
             pass
@@ -162,35 +164,60 @@ class SelfOrganizingMap(object):
         
         N, D = data.shape
 
-        # Randomize data
-        rng = np.random.RandomState(seed)
-        rndm = rng.choice(np.arange(N), size=N, replace=False)
-        data = data[rndm]
-
         # Store loss values for every epoch.
         self._loss = np.empty(maxiter)
         if init == 'random':
             sigmas = np.std(data, axis=0)
-            self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
+            if somz:
+                self._weights = (rng.rand(D, self._mapgeom.size)) + data[0][0]
+            else:
+                self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
+            
         else:
             raise ValueError('Invalid init "{}".'.format(init))
-        # Calculate mean separation between grid points as a representative large scale.
-        large_scale = np.mean(self._mapgeom.separations)
-        for i in range(maxiter):
-            loss = 0.
-            learn_rate = eta ** (i / maxiter)
-            gauss_width = large_scale ** (1 - i / maxiter)
-            for j, x in enumerate(data):
-                # Calculate the Euclidean data-space distance squared between x and
-                # each map site's weight vector.
-                bmu, dx = self.find_bmu(x, return_distances=True)
-                distsq = np.sum(dx ** 2, axis=0)
-                # The loss is the sum of smallest (data space) distances for each data point.
-                loss += np.sqrt(distsq[bmu])
-                # Update all weights (dz are map-space distances).
-                dz = self._mapgeom.separations[bmu]
-                self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
-            self._loss[i] = loss
+
+        if somz:
+            tt = 0
+            sigma0 = np.max(self._mapgeom.separations)
+            sigma_single = np.min(self._mapgeom.separations[np.where(self._mapgeom.separations > 0.)])
+            aps = 0.8
+            ape = 0.5
+            nt = maxiter * N
+            for it in range(maxiter):
+                loss = 0.
+                alpha = aps * (ape / aps) ** (tt / nt)
+                sigma = sigma0 * (sigma_single / sigma0) ** (tt / nt)
+                index_random = rng.choice(N, N, replace=False)
+                for i in range(N):
+                    tt += 1
+                    inputs = data[index_random[i]]
+                    best = self.find_bmu(inputs)
+                    h = np.exp(-(self._mapgeom.separations[best] ** 2) / sigma ** 2)
+                    dx = inputs.reshape(-1, 1) - self._weights
+                    self._weights += alpha * h * dx
+                    loss += np.sqrt(np.sum(dx ** 2, axis=0))[best]
+                self._loss[it] = loss
+        else:
+            # Randomize data
+            rndm = rng.choice(np.arange(N), size=N, replace=False)
+            data = data[rndm]
+            # Calculate mean separation between grid points as a representative large scale.
+            large_scale = np.mean(self._mapgeom.separations)
+            for i in range(maxiter):
+                loss = 0.
+                learn_rate = eta ** (i / maxiter)
+                gauss_width = large_scale ** (1 - i / maxiter)
+                for j, x in enumerate(data):
+                    # Calculate the Euclidean data-space distance squared between x and
+                    # each map site's weight vector.
+                    bmu, dx = self.find_bmu(x, return_distances=True)
+                    distsq = np.sum(dx ** 2, axis=0)
+                    # The loss is the sum of smallest (data space) distances for each data point.
+                    loss += np.sqrt(distsq[bmu])
+                    # Update all weights (dz are map-space distances).
+                    dz = self._mapgeom.separations[bmu]
+                    self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
+                self._loss[i] = loss
 
 
     def plot_u_matrix(self):
