@@ -152,22 +152,25 @@ class SelfOrganizingMap(object):
         else: return(bmu)
 
         
-    def fit(self, data, maxiter=100, eta=0.5, init='random', seed=123, somz=False):
+    def fit(self, data, target, maxiter=100, eta=0.5, init='random', seed=123, somz=False):
         
         rng = np.random.RandomState(seed)
 
+        self.data = data
+        self.target = target
+
         # Reformat data if not a numpy array.        
-        if type(data) is np.ndarray:
+        if type(self.data) is np.ndarray:
             pass
         else:   
-            data = table_to_array(data)
+            self.data = table_to_array(self.data)
         
-        N, D = data.shape
+        N, D = self.data.shape
 
         # Store loss values for every epoch.
         self._loss = np.empty(maxiter)
         if init == 'random':
-            sigmas = np.std(data, axis=0)
+            sigmas = np.std(self.data, axis=0)
             if somz:
                 self._weights = (rng.rand(D, self._mapgeom.size)) + data[0][0]
             else:
@@ -190,17 +193,17 @@ class SelfOrganizingMap(object):
                 index_random = rng.choice(N, N, replace=False)
                 for i in range(N):
                     tt += 1
-                    inputs = data[index_random[i]]
+                    inputs = self.data[index_random[i]]
                     best = self.find_bmu(inputs)
                     h = np.exp(-(self._mapgeom.separations[best] ** 2) / sigma ** 2)
                     dx = inputs.reshape(-1, 1) - self._weights
-                    self._weights += alpha * h * dx
                     loss += np.sqrt(np.sum(dx ** 2, axis=0))[best]
+                    self._weights += alpha * h * dx
                 self._loss[it] = loss
         else:
             # Randomize data
             rndm = rng.choice(np.arange(N), size=N, replace=False)
-            data = data[rndm]
+            data = self.data[rndm]
             # Calculate mean separation between grid points as a representative large scale.
             large_scale = np.mean(self._mapgeom.separations)
             for i in range(maxiter):
@@ -218,6 +221,16 @@ class SelfOrganizingMap(object):
                     dz = self._mapgeom.separations[bmu]
                     self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
                 self._loss[i] = loss
+        
+        ## TO DO: need to handle empty cells.
+        ## Find cell each training vector belongs to
+        self._indices = self.find_bmu(self.data)
+        ## Get distribution of feature values for each cell
+        self._feature_dist = [self.data[self._indices == i] for i in range(self._mapgeom.size)]
+        self._target_dist = [target[self._indices == i] for i in range(self._mapgeom.size)]
+        ## Should be mean or median?
+        self._target_vals = [np.mean(self._target_dist[i]) for i in range(self._mapgeom.size)]
+        self._target_pred = np.array(self._target_vals)[self._indices]
 
 
     def plot_u_matrix(self):
@@ -275,31 +288,22 @@ class SelfOrganizingMap(object):
         plt.imshow(rgb_map, interpolation='none', origin='lower', cmap='viridis')
         plt.show()
 
-    def map_to_som(self, data, target):
+    def map_to_som(self, data):
     
-        '''Takes input data of shape (N, features) a trained SOM and returns
-        the SOM index to which each input vector belongs and number of counts 
-        per SOM cell.'''
+        '''Takes input data of shape (N, features) and returns the predicted redshifts.'''
             
         # Reformat data if not a numpy array.        
         if type(data) is np.ndarray:
             pass
         else:   
             data = table_to_array(data)
-
-        if type(target) is np.ndarray:
-            pass
-        else:
-            target = table_to_array(target)
-
-        N, D = data.shape
-        assert target.shape == (N,)
             
-        ## Calculate distance between data weights and SOM weights
-        self._indices = self.find_bmu(data)
-        ## Get distribution of feature values for each cell
-        self._feature_dist = [data[self._indices == i] for i in range(self._mapgeom.size)]
-        self._target_dist = [target[self._indices == i] for i in range(self._mapgeom.size)]
+        ## Calculate distance between data weights and SOM weights to find 
+        ## best-matching cell for each input vector.
+        best = self.find_bmu(data)
+        ## Mean redshift per cell
+        vals = np.array(self._target_vals)
+        return(vals[best])
 
     def plot_counts_per_cell(self, norm=None):
     
