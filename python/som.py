@@ -126,6 +126,7 @@ class Grid(MapGeometry):
 def table_to_array(data):
 
     colnames = data.colnames
+    # Doesn't work when data is a single row
     data_arr = np.zeros((len(data),len(colnames)))
     for k, name in enumerate(colnames):
         data_arr[:,k] = data[name]
@@ -139,9 +140,14 @@ class SelfOrganizingMap(object):
     def find_bmu(self, data, return_distances=False):
         # Calculate best-matching cell for all inputs simultaneously:
         if len(data.shape) > 1:
-            dx = data[:, :, np.newaxis] - self._weights
-            distsq = np.sum(dx ** 2, axis=1)
-            bmu = np.argmin(distsq, axis=1)
+            #dx = data[:, :, np.newaxis] - self._weights
+            #distsq = np.sum(dx ** 2, axis=1)
+            #bmu = np.argmin(distsq, axis=1)
+            bmu = np.empty(len(data), dtype=int)
+            for i in range(len(data)):
+                dx = data[i].reshape(-1,1) - self._weights
+                distsq = np.sum(dx ** 2, axis=0)
+                bmu[i] = np.argmin(distsq)
         # Calculate best-matching cell for a single input:
         elif len(data.shape) == 1:
             dx = data.reshape(-1, 1) - self._weights
@@ -320,7 +326,7 @@ class SelfOrganizingMap(object):
         plt.title('Number per SOM cell')
         plt.show()
 
-    def plot_statistic(self, feature=None, statistic=np.nanmean):
+    def plot_statistic(self, feature=None, statistic=np.nanmean, return_stat=False):
 
         ## To do: handle empty cells
 
@@ -343,24 +349,68 @@ class SelfOrganizingMap(object):
             plt.imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
             plt.colorbar()
             plt.show()
+            
+        if return_stat:
+            return(stat)
 
-    def plot_sed_in_cell(self, cell, seed=123):
+    def build_density(self, data, target, nbins=50):
+        
+        bins = np.linspace(0, 3, nbins + 1)
+        density = np.zeros((nbins, nbins))
 
-        ngals = len(self._feature_dist[cell])
+        train_dist = self._target_dist
+        test_dat = self.table_to_array(data)
+        best = self.find_bmu(test_dat)
+        test_dist = [target[best == i] for i in range(self._mapgeom.size)]
 
-        if ngals == 0:
+        for cell, dist in enumerate(train_dist):
+            if dist.size == 0:
+                pass
+            else:
+                test_hist, _ = np.histogram(test_dist[cell], bins)
+                train_rho, _ = np.histogram(dist, bins, density=True)
+                for zbin, nz in enumerate(test_hist):
+                    density[:, zbin] += nz * train_rho
+        return(density)
+    
+    def plot_sed(self, table, cell):
+        
+        colnames = []
+        for col in table.colnames:
+            if 'sed' in col:
+                colnames.append(col)
+                    
+        in_cell = table[self._indices == cell]
+        if len(in_cell) == 0:
             return('No galaxies were mapped to this cell.')
-        else:
-            # Choose a random SED to plot
-            rng = np.random.RandomState(seed=seed)
-            idx = rng.randint(low=0, high=ngals, size=1)[0]
-            plt.figure(figsize=(10,7))
-            plt.plot(self._feature_dist[cell][idx], '.')
-            plt.plot()
-            plt.title('Random SED in bin {}'.format(cell))
-            plt.xlabel('Filter')
-            plt.ylabel('Magnitude')
-            plt.show()
+        rnd = rng.choice(len(in_cell), size=1)
+        sed = in_cell[rnd]
+
+        plt.figure(figsize(10,7))
+        wlen = np.empty(len(colnames))
+        mags = np.empty(len(colnames))
+        for k, sed_col in enumerate(colnames):
+            to_jy = 1 / (4.4659e13 / (8.4 ** 2))
+            jy = sed[sed_col] * to_jy
+            ab = -2.5 * np.log10(jy / 3631)
+            start, width = colnames[k].split('_')[1:]
+            start, width = int(start), int(width)
+            wlen[k] =  (start + (start + width)) / 2 # angstroms
+            mags[k] = ab
+        x = cell % np.abs(self._mapgeom.shape[0])
+        y = cell // np.abs(self._mapgeom.shape[1])
+        t = (f'Cell # {cell}, x = {x}, y = {y} \n'
+             f'Photo-z estimate: {np.round(self._target_pred[cell], 3)}\n'
+             f'# Objects in cell: {len(in_cell)}')
+        plt.plot(wlen, mags, 'ro')
+        plt.axis([500, 18500, np.min(mags) - 0.5, np.max(mags) + 0.5])
+        plt.text(10000, np.mean(mags) + 0.5, t, ha='left', wrap=True)
+        plt.gca().invert_yaxis()
+        plt.xlabel(r'$\AA$')
+        plt.ylabel(r'$m_{AB}$')
+        plt.show()
+                    
+        
 
 
 
