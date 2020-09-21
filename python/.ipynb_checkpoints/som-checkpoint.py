@@ -82,7 +82,7 @@ class Grid(MapGeometry):
         for k, wrapk in enumerate(self._wrap):
             nk = self.shape[k]
             xk = np.arange(nk)
-            # Calculate the (nk, nk) matrix of absolute integer separations along the k-th axis.
+            # Calculate the the (nk, nk) matrix of absolute integer separations along the k-th axis.
             dxk = np.abs(xk.reshape(nk, 1) - xk)
             if wrapk:
                 W = dxk > nk // 2
@@ -123,275 +123,296 @@ class Grid(MapGeometry):
                   extent=[-0.5, nx - 0.5, -0.5, ny - 0.5], **kwargs)
         ax.axis('off')
 
+def table_to_array(data):
+
+    colnames = data.colnames
+    # Doesn't work when data is a single row
+    data_arr = np.zeros((len(data),len(colnames)))
+    for k, name in enumerate(colnames):
+        data_arr[:,k] = data[name]
+    return(data_arr)
+
 class SelfOrganizingMap(object):
     
     def __init__(self, mapgeom):
         self._mapgeom = mapgeom
-    
-    #def fit(self, data, maxiter=100, evolve_freq=20, eta=0.9, init='random', seed=123):
-    def fit(self, data, maxiter=100, eta=0.9, init='random', seed=123):
-                
-        if type(data) is np.ndarray:
-            pass
-        else:
-            colnames = data.colnames
 
-            data_arr = np.zeros((len(data),len(colnames)))
-            for k, name in enumerate(colnames):
-                data_arr[:,k] = data[name]
-                
-            data = data_arr
+    def find_bmu(self, data, return_distances=False):
+        # Calculate best-matching cell for all inputs simultaneously:
+        if len(data.shape) > 1:
+            #dx = data[:, :, np.newaxis] - self._weights
+            #distsq = np.sum(dx ** 2, axis=1)
+            #bmu = np.argmin(distsq, axis=1)
+            bmu = np.empty(len(data), dtype=int)
+            for i in range(len(data)):
+                dx = data[i].reshape(-1,1) - self._weights
+                distsq = np.sum(dx ** 2, axis=0)
+                bmu[i] = np.argmin(distsq)
+        # Calculate best-matching cell for a single input:
+        elif len(data.shape) == 1:
+            dx = data.reshape(-1, 1) - self._weights
+            distsq = np.sum(dx ** 2, axis=0)
+            bmu = np.argmin(distsq)
+        # Find the map site with the smallest distance (largest dot product).
+        if return_distances: return(bmu, dx)
+        else: return(bmu)
+
         
-        N, D = data.shape
-        self._winner = np.empty(N, np.uint32)
+    def fit(self, data, target, maxiter=100, eta=0.5, init='random', seed=123, somz=False):
+        
         rng = np.random.RandomState(seed)
+
+        self.data = data
+        self.target = target
+
+        # Reformat data if not a numpy array.        
+        if type(self.data) is np.ndarray:
+            pass
+        else:   
+            self.data = table_to_array(self.data)
+        
+        N, D = self.data.shape
+
+        # Store loss values for every epoch.
+        self._loss = np.empty(maxiter)
         if init == 'random':
-            sigmas = np.std(data, axis=0)
-            self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
+            sigmas = np.std(self.data, axis=0)
+            if somz:
+                self._weights = (rng.rand(D, self._mapgeom.size)) + data[0][0]
+            else:
+                self._weights = sigmas.reshape(-1, 1) * rng.normal(size=(D, self._mapgeom.size))
+            
         else:
             raise ValueError('Invalid init "{}".'.format(init))
-        #assert maxiter % evolve_freq == 0
-        #n_evolve = int(maxiter / evolve_freq)
-        #evolve_iter = 0
-        #self._evolve_weights = np.tile(self._weights[np.newaxis, :, :], (n_evolve,1,1))
-        # Calculate mean separation between grid points as a representative large scale.
-        large_scale = np.max(self._mapgeom.separations)
-        # Calculate the mean separation between N uniformly distributed points in D dimensions
-        # as a representative small scale.
-        volume = np.prod(self._mapgeom.shape)
-        small_scale = (volume / N) ** (1 / D)
-        assert small_scale < large_scale, 'Check the scales!'
-        scale = large_scale
-        dscale = (small_scale / large_scale) ** (1 / maxiter)
-        for i in range(maxiter):
-            loss = 0.
-            learn_rate = eta ** (i / maxiter)
-            gauss_width = scale ** (1 - i / maxiter)
-            for j, x in enumerate(data):
-                # Calculate the Euclidean data-space distance squared between x and
-                # each map site's weight vector.
-                dx = x.reshape(-1, 1) - self._weights
-                distsq = np.sum(dx ** 2, axis=0)
-                # Not doing this yet ... 
-                # Calculate the reduced X^2 distance between training object x and
-                # the cell weight vector
-                #dx = x.reshape(-1,1) - self._weights
-                #distsq = (1 / D) * np.sum((dx ** 2) / (y.reshape(-1,1) ** 2), axis=0)
-                
-                # Find the map site with the smallest distance (largest dot product).
-                self._winner[j] = k = np.argmin(distsq)
-                # The loss is the sum of smallest (data space) distances for each data point.
-                loss += np.sqrt(distsq[k])
-                # Update all weights (dz are map-space distances).
-                dz = self._mapgeom.separations[k]
-                #self._weights += eta * np.exp(-0.5 * (dz / scale) ** 2) * dx
-                self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
-            #if i % evolve_freq == 0:
-             #   self._evolve_weights[evolve_iter] = self._weights
-              #  evolve_iter += 1
-            yield i, loss
-            # Lower the scale for the next iteration.
-            #scale *= dscale
+
+        if somz:
+            tt = 0
+            sigma0 = np.max(self._mapgeom.separations)
+            sigma_single = np.min(self._mapgeom.separations[np.where(self._mapgeom.separations > 0.)])
+            aps = 0.8
+            ape = 0.5
+            nt = maxiter * N
+            for it in range(maxiter):
+                loss = 0.
+                alpha = aps * (ape / aps) ** (tt / nt)
+                sigma = sigma0 * (sigma_single / sigma0) ** (tt / nt)
+                index_random = rng.choice(N, N, replace=False)
+                for i in range(N):
+                    tt += 1
+                    inputs = self.data[index_random[i]]
+                    best = self.find_bmu(inputs)
+                    h = np.exp(-(self._mapgeom.separations[best] ** 2) / sigma ** 2)
+                    dx = inputs.reshape(-1, 1) - self._weights
+                    loss += np.sqrt(np.sum(dx ** 2, axis=0))[best]
+                    self._weights += alpha * h * dx
+                self._loss[it] = loss
+        else:
+            # Randomize data
+            rndm = rng.choice(np.arange(N), size=N, replace=False)
+            data = self.data[rndm]
+            # Calculate mean separation between grid points as a representative large scale.
+            large_scale = np.mean(self._mapgeom.separations)
+            for i in range(maxiter):
+                loss = 0.
+                learn_rate = eta ** (i / maxiter)
+                gauss_width = large_scale ** (1 - i / maxiter)
+                for j, x in enumerate(data):
+                    # Calculate the Euclidean data-space distance squared between x and
+                    # each map site's weight vector.
+                    bmu, dx = self.find_bmu(x, return_distances=True)
+                    distsq = np.sum(dx ** 2, axis=0)
+                    # The loss is the sum of smallest (data space) distances for each data point.
+                    loss += np.sqrt(distsq[bmu])
+                    # Update all weights (dz are map-space distances).
+                    dz = self._mapgeom.separations[bmu]
+                    self._weights += learn_rate * np.exp(-0.5 * (dz / gauss_width) ** 2) * dx
+                self._loss[i] = loss
+        
+        ## TO DO: need to handle empty cells.
+        ## Find cell each training vector belongs to
+        self._indices = self.find_bmu(self.data)
+        ## Get distribution of feature values for each cell
+        self._feature_dist = [self.data[self._indices == i] for i in range(self._mapgeom.size)]
+        self._target_dist = [target[self._indices == i] for i in range(self._mapgeom.size)]
+        ## Should be mean or median?
+        self._target_vals = [np.mean(self._target_dist[i]) for i in range(self._mapgeom.size)]
+        self._target_pred = np.array(self._target_vals)[self._indices]
 
 
-def u_matrix(som):
-    
-    ''' * Add option to interpolate onto finer grid
-    
-    From p. 337 of this paper https://link.springer.com/content/pdf/10.1007%2F978-3-642-15381-5.pdf'''
-    
-    rows, cols, D = som.shape
-    
-    u_matrix = np.empty((rows, cols))
-    
-    for i in range(rows):
-        for j in range(cols):
-            dist = 0
-            ## neighbor above
-            if i < rows - 1:
-                dist += np.sqrt(np.sum((som[i,j] - som[i+1,j]) ** 2))
-            ## neighbor below
-            if i > 0:
-                dist += np.sqrt(np.sum((som[i,j] - som[i-1,j]) ** 2))
-            ## neighbor left
-            if j > 0:
-                dist += np.sqrt(np.sum((som[i,j] - som[i,j-1]) ** 2))
-            ## neighbor right
-            if j < cols - 1:
-                dist += np.sqrt(np.sum((som[i,j] - som[i,j+1]) ** 2))
-            u_matrix[i,j] = np.sum(dist)
+    def plot_u_matrix(self):
+        
+        ''' 
+        Visualize the weights in two dimensions.
+        
+        * Add option to interpolate onto finer grid
+        From p. 337 of this paper https://link.springer.com/content/pdf/10.1007%2F978-3-642-15381-5.pdf'''
+        
+        rows, cols = self._mapgeom.shape
+        u_matrix = np.empty((rows, cols))
+        
+        for i in range(rows):
+            for j in range(cols):
+                dist = 0
+                ## neighbor above
+                if i < rows - 1:
+                    dist += np.sqrt(np.sum((self._weights[i,j] - self._weights[i+1,j]) ** 2))
+                ## neighbor below
+                if i > 0:
+                    dist += np.sqrt(np.sum((self._weights[i,j] - self._weights[i-1,j]) ** 2))
+                ## neighbor left
+                if j > 0:
+                    dist += np.sqrt(np.sum((self._weights[i,j] - self._weights[i,j-1]) ** 2))
+                ## neighbor right
+                if j < cols - 1:
+                    dist += np.sqrt(np.sum((self._weights[i,j] - self._weights[i,j+1]) ** 2))
+                u_matrix[i,j] = np.sum(dist)
 
-                
-    ## interpolate u_matrix onto (2X-1) x (2Y-1) grid
-    #x = np.arange(0,rows - interp_int, interp_int)
-    #y = np.arange(0,cols - interp_int, interp_int)
+        plt.figure(figsize=(10,7))
+        plt.imshow(u_map, interpolation='none', origin='lower', cmap='viridis')
+        plt.show()
+
+    def plot_rgb(self, features=None):
+
+        '''Visualize the weights on an RGB scale using only three features.
+        If features isn't specified, then the first three features are used.
+        
+        Inputs
+        ------
+        features: List of indices for each feature to include in the map.'''
+
+        rows, cols = self._mapgeom.shape
+        weights = self._weights.T
+        # Normalize weights to be between [0,1]
+        weights = (weights - weights.min(axis=0)) / (weights.max(axis=0) - weights.min(axis=0))
+        # Select features to show in RGB map
+        if features:
+            rgb = weights[:,features]
+        else:
+            rgb = weights[:,:3]
+        rgb_map = rgb.reshape(rows, cols, 3)
+
+        plt.imshow(rgb_map, interpolation='none', origin='lower', cmap='viridis')
+        plt.show()
+
+    def map_to_som(self, data):
+    
+        '''Takes input data of shape (N, features) and returns the predicted redshifts.'''
             
-    return(u_matrix)
-
-#def make_som(data, nmap=-50, niter=100, evolve_freq=20, eta=0.1, rgb=None, save=None):
-def make_som(data, nmap=-50, niter=100, eta=0.9, rgb=None, save=None):
-
-    # Build the self-organizing map.
-    som = SelfOrganizingMap(Grid(nmap, nmap))
-    losses = []
-    #for it, loss in som.fit(data, maxiter=niter, evolve_freq=evolve_freq, eta=eta):
-    for it, loss in som.fit(data, maxiter=niter, eta=eta):
-        if it > 0:
-            if losses[it-1] < loss:
-                print('Loss function getting worse at iteration {}'.format(it))
-                print(losses[it-1], loss)
-        losses.append(loss)
-        #eta *= 0.9
-
-    if type(data) is np.ndarray:
-        N, D = data.shape
-    else:
-        D = len(data.colnames)
-
-    # Plot the results.
-    fig, ax = plt.subplots(2, 1, figsize=(8, 16))
-    ax = ax.ravel()
-    weights = som._weights.T
-    som_img = weights.reshape(abs(nmap), abs(nmap), D)
-    weights = (weights - weights.min(axis=0)) / (weights.max(axis=0) - weights.min(axis=0))
-    if rgb:
-        rgb_som = np.empty((weights.shape[0],3))
-        for i, band in enumerate(rgb):
-            rgb_som[:,i] = weights[:,band]
-        rgb_som /= np.max(rgb_som)
-        rgb_img = rgb_som.reshape(abs(nmap), abs(nmap), 3)
-        im = ax[0].imshow(rgb_img, interpolation='none', origin='lower', cmap='viridis')
-    else:
-        u_map = u_matrix(som_img)
-        im = ax[0].imshow(u_map, interpolation='none', origin='lower', cmap='viridis')
-    fig.colorbar(im, ax=ax[0])
-    ax[0].axis('off')
-    ax[1].plot(losses, 'ko')
-    ax[1].set_xlabel('Epoch')
-    ax[1].set_ylabel('Training Loss')
-    plt.tight_layout()
-
-    if save:
-        np.save(save+'_img', som_img)
-        np.save(save+'_losses', losses)
-
-    #return(weights, som._evolve_weights.T, som_img)
-    return(weights, som_img)
-
-def deep_phot_hist2d(deep_data, phot_data, cols=['u-g', 'g-r'], bins=100):
-    
-    n_deep= len(deep_data)
-    n_phot = len(phot_data)
-    
-    fig, axs = plt.subplots(1,2, figsize=(16,6))
-    axs = axs.ravel()
-
-    hist2d0 = np.histogram2d(deep_data[cols[0]], deep_data[cols[1]], bins=bins)
-    hist2d1 = np.histogram2d(phot_data[cols[0]], phot_data[cols[1]], bins=bins)
-
-    im0 = axs[0].hist2d(deep_data[cols[0]], deep_data[cols[1]], weights=np.ones(n_deep) / np.max(hist2d0[0]), bins=bins)
-    cbar0 = fig.colorbar(im0[-1], ax=axs[0])
-    cbar0.set_label('# / cell max', rotation=270, labelpad=20)
-    axs[0].set_title('rndm_spec histogram')
-
-    im1 = axs[1].hist2d(phot_data[cols[0]], phot_data[cols[1]], weights=np.ones(n_phot) / np.max(hist2d1[0]), bins=bins)
-    cbar1 = fig.colorbar(im1[-1], ax=axs[1])
-    cbar1.set_label('# / cell max', rotation=270, labelpad=20)
-    axs[1].set_title('rndm_phot histogram')
-
-    plt.show()
-
-def map_phot_to_som(data, som_weights):
-    
-    '''Takes an (N, features) data array and a SOM and returns
-    the flattened SOM index to which each data vector belongs, 
-    as well as the number of data points mapped to each SOM cell.'''
-    
-    rows, cols, D = som_weights.shape
-    
-    if type(data) is np.ndarray:
+        # Reformat data if not a numpy array.        
+        if type(data) is np.ndarray:
             pass
-    else:
-        colnames = data.colnames
+        else:   
+            data = table_to_array(data)
+            
+        ## Calculate distance between data weights and SOM weights to find 
+        ## best-matching cell for each input vector.
+        best = self.find_bmu(data)
+        ## Mean redshift per cell
+        vals = np.array(self._target_vals)
+        return(vals[best])
 
-        data_arr = np.zeros((len(data),len(colnames)))
-        for k, name in enumerate(colnames):
-            data_arr[:,k] = data[name]
+    def plot_counts_per_cell(self, norm=None):
+    
+        '''Plot number of data points mapped to each SOM cell.'''
 
-        data = data_arr
+        # Determine frequency of each index on SOM resolution grid
+        counts = np.bincount(self._indices, minlength=(self._mapgeom.size))
+        self._counts = counts.reshape(self._mapgeom.shape)
+
+        plt.figure(figsize=(10,7))
+        plt.imshow(self._counts, origin='lower', interpolation='none', 
+            cmap='viridis', norm=norm)
+        plt.colorbar()
+        plt.title('Number per SOM cell')
+        plt.show()
+
+    def plot_statistic(self, feature=None, statistic=np.nanmean, return_stat=False):
+
+        ## To do: handle empty cells
+
+        if feature:
+            fig, axs = plt.subplots(1,2, figsize=(12,5))
+            axs = axs.ravel()
+            # Plot statistic of feature per cell
+            stat = np.asarray([statistic(self._feature_dist[i][:,feature]) for i in range(self._mapgeom.size)])
+            im0 = axs[0].imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            fig.colorbar(im0, ax=axs[0])
+            # Plot statistic of difference between feature weights and node weights per cell
+            diff = np.asarray([statistic(self._feature_dist[i] - self._weights.T[i], axis=0)[feature] for i in range(self._mapgeom.size)])
+            im1 = axs[1].imshow(diff.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            fig.colorbar(im1, ax=axs[1])
+            plt.show()
+
+        else:
+            stat = np.asarray([statistic(self._target_dist[i]) for i in range(self._mapgeom.size)])
+            plt.figure(figsize=(10,7))
+            plt.imshow(stat.reshape(self._mapgeom.shape), origin='lower', interpolation='none', cmap='viridis')
+            plt.colorbar()
+            plt.show()
+            
+        if return_stat:
+            return(stat)
+
+    def build_density(self, data, target, nbins=50):
         
-    ## Calculate L2 norm distance between data weights and SOM weights
-    som_indices = np.empty(len(data), dtype=int)
-    for i, dat in enumerate(data):
-        dx = (dat - som_weights.reshape(rows * cols,-1))
-        dist = np.sqrt(np.sum(dx ** 2, axis=1))
-        som_indices[i] = np.argmin(dist)
+        bins = np.linspace(0, 3, nbins + 1)
+        density = np.zeros((nbins, nbins))
+
+        train_dist = self._target_dist
+        test_dat = table_to_array(data)
+        best = self.find_bmu(test_dat)
+        test_dist = [target[best == i] for i in range(self._mapgeom.size)]
+
+        for cell, dist in enumerate(train_dist):
+            if dist.size == 0:
+                pass
+            else:
+                test_hist, _ = np.histogram(test_dist[cell], bins)
+                train_rho, _ = np.histogram(dist, bins, density=True)
+                for zbin, nz in enumerate(test_hist):
+                    density[:, zbin] += nz * train_rho
+        return(density)
+    
+    def plot_sed(self, table, cell):
         
-    ## Determine frequency of each index on SOM resolution grid
-    counts = np.bincount(som_indices, minlength=(rows * cols))
-    
-    return(som_indices, counts)
+        colnames = []
+        for col in table.colnames:
+            if 'sed' in col:
+                colnames.append(col)
+                    
+        in_cell = table[self._indices == cell]
+        if len(in_cell) == 0:
+            return('No galaxies were mapped to this cell.')
+        rnd = rng.choice(len(in_cell), size=1)
+        sed = in_cell[rnd]
 
-def plot_counts_per_cell(som_indices, som_counts, rows, cols, norm=None):
-    
-    '''Plot number of data points mapped to each SOM cell
-
-    Counts must have same shape as SOM grid.'''
-
-    plt.figure(figsize=(10,7))
-    plt.imshow(som_counts.reshape(rows,cols), origin='lower', interpolation='none', cmap='viridis', norm=norm)
-    plt.colorbar()
-    plt.title('Number per SOM cell')
-    plt.show()
-    
-    
-def plot_statistic(som_indices, som_counts, target_feature, rows, cols, statistic=np.mean):
-    
-    stat = np.asarray([statistic(target_feature[som_indices == i]) for i in range(rows * cols)])
-    
-    plt.figure(figsize=(10,7))
-    plt.imshow(stat.reshape(rows,cols), origin='lower', interpolation='none', cmap='viridis')
-    plt.colorbar()
-    plt.title('{} of target feature per cell'.format(statistic.__name__))
-    plt.show()
-    
-
-def plot_dist_in_cell(som_indices, target_feature, cols, idx=(0,0), bins=20):
+        plt.figure(figsize(10,7))
+        wlen = np.empty(len(colnames))
+        mags = np.empty(len(colnames))
+        for k, sed_col in enumerate(colnames):
+            to_jy = 1 / (4.4659e13 / (8.4 ** 2))
+            jy = sed[sed_col] * to_jy
+            ab = -2.5 * np.log10(jy / 3631)
+            start, width = colnames[k].split('_')[1:]
+            start, width = int(start), int(width)
+            wlen[k] =  (start + (start + width)) / 2 # angstroms
+            mags[k] = ab
+        x = cell % np.abs(self._mapgeom.shape[0])
+        y = cell // np.abs(self._mapgeom.shape[1])
+        t = (f'Cell # {cell}, x = {x}, y = {y} \n'
+             f'Photo-z estimate: {np.round(self._target_pred[cell], 3)}\n'
+             f'# Objects in cell: {len(in_cell)}')
+        plt.plot(wlen, mags, 'ro')
+        plt.axis([500, 18500, np.min(mags) - 0.5, np.max(mags) + 0.5])
+        plt.text(10000, np.mean(mags) + 0.5, t, ha='left', wrap=True)
+        plt.gca().invert_yaxis()
+        plt.xlabel(r'$\AA$')
+        plt.ylabel(r'$m_{AB}$')
+        plt.show()
+                    
         
-    flattened_idx = idx[0] * cols + idx[1]
-    
-    plt.figure(figsize=(10,7))
-    plt.hist(target_feature[som_indices == flattened_idx], bins=bins)
-    plt.title('n(z) in bin {}'.format(idx))
-    plt.xlabel('z')
-    plt.ylabel('counts')
-    plt.show()
-    
-    
-def plot_sed_in_cell(data, som_indices, cols, rng, idx=(0,0)):
-    
-    if type(data) is np.ndarray:
-            pass
-    else:
-        colnames = data.colnames
 
-        data_arr = np.zeros((len(data),len(colnames)))
-        for k, name in enumerate(colnames):
-            data_arr[:,k] = data[name]
 
-        data = data_arr
-    
-    
-    flattened_idx = idx[0] * cols + idx[1]
-    gals_in_cell = data[som_indices == flattened_idx]
-    rndm_idx = rng.randint(low=0, high=len(gals_in_cell), size=1)
-    
-    plt.figure(figsize=(10,7))
-    plt.plot(gals_in_cell[rndm_idx].reshape(-1), '.')
-    plt.title('SED in bin {}'.format(idx))
-    plt.xlabel('band')
-    plt.ylabel('mag')
-    plt.show()
 
 
 

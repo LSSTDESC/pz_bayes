@@ -359,7 +359,7 @@ class SelfOrganizingMap(object):
         density = np.zeros((nbins, nbins))
 
         train_dist = self._target_dist
-        test_dat = self.table_to_array(data)
+        test_dat = table_to_array(data)
         best = self.find_bmu(test_dat)
         test_dist = [target[best == i] for i in range(self._mapgeom.size)]
 

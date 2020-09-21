@@ -1,3 +1,2 @@
-python/__pycache__/*
-python/.ipynb_checkpoints/*
-notebooks/.ipynb_checkpoints/*
+__pycache__
+.ipynb_checkpoints
